@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from itertools import product
 from math import exp
+from dataclasses import dataclass
 from typing import Dict, Iterable, List, Tuple
 
 # Canonical variable ordering used across the project.
@@ -44,6 +45,96 @@ RISK_WEIGHTS = {
 PARENT_ORDER = ["Location", "Time", "Device", "Amount", "Frequency"]
 
 
+@dataclass(frozen=True)
+class BayesianNetworkModel:
+    """Minimal Bayesian network container for exact inference."""
+
+    variables: Dict[str, List[str]]
+    edges: List[Tuple[str, str]]
+    priors: Dict[str, Dict[str, float]]
+    fraud_cpt: List[Dict[str, object]]
+
+    def validate(self) -> None:
+        validate_priors()
+        fraud_rows = len(self.fraud_cpt)
+        expected_rows = 1
+        for parent in PARENT_ORDER:
+            expected_rows *= len(self.variables[parent])
+        if fraud_rows != expected_rows:
+            raise ValueError(f"Fraud CPT has {fraud_rows} rows but expected {expected_rows}.")
+
+        for row in self.fraud_cpt:
+            if abs((row["P(Fraud=No)"] + row["P(Fraud=Yes)"]) - 1.0) > 1e-9:
+                raise ValueError("Fraud CPT row does not sum to 1.0.")
+
+    def _root_assignment_probability(self, assignment: Dict[str, str]) -> float:
+        probability = 1.0
+        for node in PARENT_ORDER:
+            probability *= self.priors[node][assignment[node]]
+        return probability
+
+    def _fraud_probability_yes(self, assignment: Dict[str, str]) -> float:
+        for row in self.fraud_cpt:
+            if all(row[parent] == assignment[parent] for parent in PARENT_ORDER):
+                return float(row["P(Fraud=Yes)"])
+        raise KeyError("No Fraud CPT row matched the provided assignment.")
+
+    def joint_probability(self, assignment: Dict[str, str]) -> float:
+        """Return P(assignment) for either a full assignment or a root assignment + Fraud."""
+        self.validate()
+        root_probability = self._root_assignment_probability(assignment)
+
+        if "Fraud" in assignment:
+            fraud_probability = self._fraud_probability_yes(assignment)
+            return root_probability * (fraud_probability if assignment["Fraud"] == "Yes" else 1.0 - fraud_probability)
+
+        return root_probability
+
+    def enumerate_root_assignments(self) -> Iterable[Dict[str, str]]:
+        for combo in _parent_combinations():
+            yield dict(zip(PARENT_ORDER, combo))
+
+    def query_distribution(self, node: str, evidence: Dict[str, str] | None = None) -> Dict[str, float]:
+        evidence = evidence or {}
+        _validate_evidence(evidence)
+
+        if node not in self.variables:
+            raise ValueError(f"Unknown node requested: {node}")
+
+        states = self.variables[node]
+        unnormalized: Dict[str, float] = {state: 0.0 for state in states}
+
+        for assignment in self.enumerate_root_assignments():
+            if any(assignment[parent] != value for parent, value in evidence.items() if parent in PARENT_ORDER):
+                continue
+
+            prior = self._root_assignment_probability(assignment)
+            fraud_yes = self._fraud_probability_yes(assignment)
+
+            if node == "Fraud":
+                fraud_states = [evidence["Fraud"]] if "Fraud" in evidence else ["No", "Yes"]
+                for fraud_state in fraud_states:
+                    if fraud_state == "Yes":
+                        unnormalized[fraud_state] += prior * fraud_yes
+                    else:
+                        unnormalized[fraud_state] += prior * (1.0 - fraud_yes)
+                continue
+
+            if assignment[node] != evidence.get(node, assignment[node]):
+                continue
+
+            if "Fraud" in evidence:
+                unnormalized[node if node in evidence else assignment[node]] += prior * (
+                    fraud_yes if evidence["Fraud"] == "Yes" else 1.0 - fraud_yes
+                )
+            else:
+                unnormalized[assignment[node]] += prior
+        total_probability = sum(unnormalized.values())
+        if total_probability == 0.0:
+            raise ValueError("Evidence is inconsistent with the model.")
+        return {state: value / total_probability for state, value in unnormalized.items()}
+
+
 def _sigmoid(value: float) -> float:
     return 1.0 / (1.0 + exp(-value))
 
@@ -66,13 +157,7 @@ def build_fraud_cpt() -> List[Dict[str, object]]:
     for combo in _parent_combinations():
         evidence = dict(zip(PARENT_ORDER, combo))
         p_yes = fraud_probability_yes(evidence)
-        rows.append(
-            {
-                **evidence,
-                "P(Fraud=No)": round(1.0 - p_yes, 6),
-                "P(Fraud=Yes)": round(p_yes, 6),
-            }
-        )
+        rows.append({**evidence, "P(Fraud=No)": 1.0 - p_yes, "P(Fraud=Yes)": p_yes})
     return rows
 
 
@@ -82,6 +167,44 @@ def validate_priors() -> None:
         total = sum(distribution.values())
         if abs(total - 1.0) > 1e-9:
             raise ValueError(f"Prior probabilities for {variable} sum to {total}, not 1.0")
+
+
+def build_model() -> BayesianNetworkModel:
+    """Build and validate the Bayesian Network used for exact inference."""
+    model = BayesianNetworkModel(
+        variables=VARIABLE_STATES,
+        edges=EDGES,
+        priors=PRIORS,
+        fraud_cpt=build_fraud_cpt(),
+    )
+    model.validate()
+    return model
+
+
+def _validate_evidence(evidence: Dict[str, str]) -> None:
+    for node, state in evidence.items():
+        if node == "Fraud":
+            if state not in VARIABLE_STATES["Fraud"]:
+                raise ValueError(f"Invalid state '{state}' for node 'Fraud'.")
+            continue
+        if node not in VARIABLE_STATES:
+            raise ValueError(f"Unknown node in evidence: {node}")
+        if state not in VARIABLE_STATES[node]:
+            raise ValueError(f"Invalid state '{state}' for node '{node}'.")
+
+
+def get_fraud_probability(evidence_dict: Dict[str, str] | None = None) -> float:
+    """Return posterior P(Fraud=Yes | evidence) using exact inference."""
+    evidence = evidence_dict or {}
+    _validate_evidence(evidence)
+    return build_model().query_distribution("Fraud", evidence)["Yes"]
+
+
+def get_node_marginal(node: str, evidence_dict: Dict[str, str] | None = None) -> Dict[str, float]:
+    """Return posterior distribution for any node as {state: probability}."""
+    evidence = evidence_dict or {}
+    _validate_evidence(evidence)
+    return build_model().query_distribution(node, evidence)
 
 
 def sanity_examples() -> Dict[str, float]:
@@ -109,15 +232,15 @@ def sanity_examples() -> Dict[str, float]:
             "Frequency": "Normal",
         },
     }
-    return {name: round(fraud_probability_yes(evidence), 6) for name, evidence in scenarios.items()}
+    return {name: round(get_fraud_probability(evidence), 6) for name, evidence in scenarios.items()}
 
 
 PHASE1_FRAUD_CPT = build_fraud_cpt()
 
 
 if __name__ == "__main__":
-    validate_priors()
-    print("Phase 1 model artifacts initialized successfully.")
+    build_model()
+    print("Phase 2 backend initialized successfully.")
     print(f"Total Fraud CPT rows: {len(PHASE1_FRAUD_CPT)}")
     print("Sanity examples P(Fraud=Yes):")
     for scenario_name, probability in sanity_examples().items():
