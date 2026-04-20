@@ -110,25 +110,23 @@ class BayesianNetworkModel:
 
             prior = self._root_assignment_probability(assignment)
             fraud_yes = self._fraud_probability_yes(assignment)
+            evidence_probability = 1.0
+            if "Fraud" in evidence:
+                evidence_probability = fraud_yes if evidence["Fraud"] == "Yes" else 1.0 - fraud_yes
 
             if node == "Fraud":
-                fraud_states = [evidence["Fraud"]] if "Fraud" in evidence else ["No", "Yes"]
-                for fraud_state in fraud_states:
-                    if fraud_state == "Yes":
-                        unnormalized[fraud_state] += prior * fraud_yes
-                    else:
-                        unnormalized[fraud_state] += prior * (1.0 - fraud_yes)
+                if "Fraud" in evidence:
+                    unnormalized[evidence["Fraud"]] += prior * evidence_probability
+                else:
+                    unnormalized["Yes"] += prior * fraud_yes
+                    unnormalized["No"] += prior * (1.0 - fraud_yes)
                 continue
 
-            if assignment[node] != evidence.get(node, assignment[node]):
-                continue
+            for state in states:
+                if assignment[node] != state:
+                    continue
+                unnormalized[state] += prior * evidence_probability
 
-            if "Fraud" in evidence:
-                unnormalized[node if node in evidence else assignment[node]] += prior * (
-                    fraud_yes if evidence["Fraud"] == "Yes" else 1.0 - fraud_yes
-                )
-            else:
-                unnormalized[assignment[node]] += prior
         total_probability = sum(unnormalized.values())
         if total_probability == 0.0:
             raise ValueError("Evidence is inconsistent with the model.")
