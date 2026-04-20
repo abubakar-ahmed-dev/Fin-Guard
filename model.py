@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from itertools import product
 from math import exp
-from dataclasses import dataclass
 from typing import Dict, Iterable, List, Tuple
 
-# Canonical variable ordering used across the project.
 VARIABLE_STATES: Dict[str, List[str]] = {
     "Location": ["Local", "Foreign"],
     "Time": ["Day", "Night"],
@@ -15,7 +14,6 @@ VARIABLE_STATES: Dict[str, List[str]] = {
     "Fraud": ["No", "Yes"],
 }
 
-# DAG edges (all roots point to Fraud in baseline model).
 EDGES: List[Tuple[str, str]] = [
     ("Location", "Fraud"),
     ("Time", "Fraud"),
@@ -24,7 +22,6 @@ EDGES: List[Tuple[str, str]] = [
     ("Frequency", "Fraud"),
 ]
 
-# Priors for root nodes.
 PRIORS: Dict[str, Dict[str, float]] = {
     "Location": {"Local": 0.85, "Foreign": 0.15},
     "Time": {"Day": 0.70, "Night": 0.30},
@@ -47,7 +44,7 @@ PARENT_ORDER = ["Location", "Time", "Device", "Amount", "Frequency"]
 
 @dataclass(frozen=True)
 class BayesianNetworkModel:
-    """Minimal Bayesian network container for exact inference."""
+    """Bayesian network container for exact inference."""
 
     variables: Dict[str, List[str]]
     edges: List[Tuple[str, str]]
@@ -78,17 +75,6 @@ class BayesianNetworkModel:
             if all(row[parent] == assignment[parent] for parent in PARENT_ORDER):
                 return float(row["P(Fraud=Yes)"])
         raise KeyError("No Fraud CPT row matched the provided assignment.")
-
-    def joint_probability(self, assignment: Dict[str, str]) -> float:
-        """Return P(assignment) for either a full assignment or a root assignment + Fraud."""
-        self.validate()
-        root_probability = self._root_assignment_probability(assignment)
-
-        if "Fraud" in assignment:
-            fraud_probability = self._fraud_probability_yes(assignment)
-            return root_probability * (fraud_probability if assignment["Fraud"] == "Yes" else 1.0 - fraud_probability)
-
-        return root_probability
 
     def enumerate_root_assignments(self) -> Iterable[Dict[str, str]]:
         for combo in _parent_combinations():
@@ -205,41 +191,6 @@ def get_node_marginal(node: str, evidence_dict: Dict[str, str] | None = None) ->
     return build_model().query_distribution(node, evidence)
 
 
-def sanity_examples() -> Dict[str, float]:
-    """Canonical scenarios for quick manual sanity checks."""
-    scenarios = {
-        "low_risk": {
-            "Location": "Local",
-            "Time": "Day",
-            "Device": "Known",
-            "Amount": "Low",
-            "Frequency": "Normal",
-        },
-        "high_risk": {
-            "Location": "Foreign",
-            "Time": "Night",
-            "Device": "Unknown",
-            "Amount": "High",
-            "Frequency": "Unusual",
-        },
-        "mixed_risk": {
-            "Location": "Local",
-            "Time": "Night",
-            "Device": "Known",
-            "Amount": "Medium",
-            "Frequency": "Normal",
-        },
-    }
-    return {name: round(get_fraud_probability(evidence), 6) for name, evidence in scenarios.items()}
-
-
-PHASE1_FRAUD_CPT = build_fraud_cpt()
-
-
 if __name__ == "__main__":
     build_model()
-    print("Phase 2 backend initialized successfully.")
-    print(f"Total Fraud CPT rows: {len(PHASE1_FRAUD_CPT)}")
-    print("Sanity examples P(Fraud=Yes):")
-    for scenario_name, probability in sanity_examples().items():
-        print(f"  - {scenario_name}: {probability:.4f}")
+    print("Backend initialized successfully.")

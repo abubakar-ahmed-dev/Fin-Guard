@@ -1,5 +1,4 @@
 *.md
-*.txt
 .venv/
 __pycache__/
 *.pyc
