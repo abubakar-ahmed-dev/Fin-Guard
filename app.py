@@ -7,7 +7,15 @@ import networkx as nx
 from matplotlib.colors import to_rgb
 import streamlit as st
 
-from model import EDGES, VARIABLE_STATES, get_fraud_probability, get_node_marginal
+from model import (
+    EDGES,
+    VARIABLE_STATES,
+    get_fraud_probability,
+    get_node_marginal,
+    initialize_variables,
+    ML_VARIABLE_STATES,
+    USE_CACHE,
+)
 
 st.set_page_config(
     page_title="AI Fraud Risk Estimator",
@@ -86,11 +94,44 @@ st.markdown(
         background: #fde0e0;
         color: #a12626;
     }
+    .model-toggle {
+        display: flex;
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+        padding: 1rem;
+        background: rgba(255, 255, 255, 0.8);
+        border-radius: 0.75rem;
+        border: 1px solid rgba(16, 42, 67, 0.1);
+    }
+    .model-badge {
+        display: inline-block;
+        padding: 0.4rem 0.8rem;
+        border-radius: 0.5rem;
+        font-size: 0.85rem;
+        font-weight: 700;
+    }
+    .badge-rule {
+        background: #e3f2fd;
+        color: #1565c0;
+    }
+    .badge-ml {
+        background: #f3e5f5;
+        color: #6a1b9a;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
+# ============================================================
+# Initialize Model Selection
+# ============================================================
+
+if "model_type" not in st.session_state:
+    st.session_state.model_type = "rule-based"
+
+# Check if ML model is available
+ml_available = USE_CACHE
 
 GRAPH_POSITIONS = {
     "Location": (-2.15, 0.95),
@@ -101,14 +142,20 @@ GRAPH_POSITIONS = {
     "Fraud": (0.0, 0.68),
 }
 
-
 NODE_COLOR_PALETTE = {
     "Location": {"Local": "#1a925a", "Foreign": "#e75151"},
     "Time": {"Day": "#1a925a", "Night": "#e75151"},
     "Device": {"Known": "#1a925a", "Unknown": "#e75151"},
     "Amount": {"Low": "#1a925a", "Medium": "#e7ab51", "High": "#e75151"},
-    "Frequency": {"Normal": "#1a925a", "Unusual": "#e75151"},
+    "Frequency": {"Frequent": "#1a925a", "Rare": "#e75151"},
 }
+
+# Support for ML-based variable states
+if ml_available:
+    NODE_COLOR_PALETTE["Frequency"] = {
+        "Frequent": "#1a925a",
+        "Rare": "#e75151",
+    }
 
 NODE_LABELS = {
     "Location": "Location",
@@ -124,17 +171,27 @@ EVIDENCE_SIGNAL_SCORE = {
     "Time": {"Day": 0, "Night": 1},
     "Device": {"Known": 0, "Unknown": 2},
     "Amount": {"Low": 0, "Medium": 1, "High": 2},
-    "Frequency": {"Normal": 0, "Unusual": 2},
+    "Frequency": {"Frequent": 0, "Rare": 2},
 }
 
+# Add ML-based signal scores if available
+if ml_available:
+    EVIDENCE_SIGNAL_SCORE["Frequency"] = {
+        "Frequent": 0,
+        "Rare": 2,
+    }
 
-def build_evidence() -> Dict[str, str]:
+
+def build_evidence(model_type: str) -> Dict[str, str]:
+    """Build evidence dictionary based on the selected model type."""
+    current_vars = VARIABLE_STATES if VARIABLE_STATES else (ML_VARIABLE_STATES if ml_available else {})
+    
     return {
-        "Location": st.session_state.get("location", VARIABLE_STATES["Location"][0]),
-        "Time": st.session_state.get("time_of_day", VARIABLE_STATES["Time"][0]),
-        "Device": st.session_state.get("device", VARIABLE_STATES["Device"][0]),
-        "Amount": st.session_state.get("amount", VARIABLE_STATES["Amount"][0]),
-        "Frequency": st.session_state.get("frequency", VARIABLE_STATES["Frequency"][0]),
+        "Location": st.session_state.get("location", current_vars.get("Location", ["Local"])[0]),
+        "Time": st.session_state.get("time_of_day", current_vars.get("Time", ["Day"])[0]),
+        "Device": st.session_state.get("device", current_vars.get("Device", ["Known"])[0]),
+        "Amount": st.session_state.get("amount", current_vars.get("Amount", ["Low"])[0]),
+        "Frequency": st.session_state.get("frequency", current_vars.get("Frequency", ["Frequent"])[0]),
     }
 
 
@@ -199,33 +256,35 @@ def node_style(
 
     if node == "Frequency":
         if node in evidence:
-            base_color = NODE_COLOR_PALETTE[node][evidence[node]]
+            base_color = NODE_COLOR_PALETTE[node].get(evidence[node], "#1a925a")
             return blend_with_white(base_color, 0.0), base_color, "white", 0.22
 
         top_state = max(posterior, key=posterior.get)
-        base_color = NODE_COLOR_PALETTE[node][top_state]
+        base_color = NODE_COLOR_PALETTE[node].get(top_state, "#1a925a")
         confidence = posterior[top_state]
         lightness = 0.78 - min(confidence, 0.9) * 0.28
         return blend_with_white(base_color, lightness), base_color, "#102a43", 0.21
 
     if node in evidence:
-        base_color = NODE_COLOR_PALETTE[node][evidence[node]]
+        base_color = NODE_COLOR_PALETTE[node].get(evidence[node], "#1a925a")
         return blend_with_white(base_color, 0.0), base_color, "white", 0.19
 
     top_state = max(posterior, key=posterior.get)
-    base_color = NODE_COLOR_PALETTE[node][top_state]
+    base_color = NODE_COLOR_PALETTE[node].get(top_state, "#1a925a")
     confidence = posterior[top_state]
     lightness = 0.78 - min(confidence, 0.9) * 0.28
     return blend_with_white(base_color, lightness), base_color, "#102a43", 0.18
 
 
-def render_bayesian_network(evidence: Dict[str, str]) -> None:
+def render_bayesian_network(evidence: Dict[str, str], model_type: str) -> None:
     graph = nx.DiGraph()
-    graph.add_nodes_from(VARIABLE_STATES.keys())
+    current_vars = VARIABLE_STATES if VARIABLE_STATES else (ML_VARIABLE_STATES if ml_available else {})
+    
+    graph.add_nodes_from(current_vars.keys())
     graph.add_edges_from(EDGES)
 
-    fraud_probability = get_fraud_probability(evidence)
-    node_posteriors = {node: get_node_marginal(node, evidence) for node in VARIABLE_STATES}
+    fraud_probability = get_fraud_probability(evidence, model_type=model_type)
+    node_posteriors = {node: get_node_marginal(node, evidence, model_type=model_type) for node in current_vars}
 
     fig, ax = plt.subplots(figsize=(8.8, 4.8), dpi=170)
     fig.patch.set_facecolor("white")
@@ -238,7 +297,7 @@ def render_bayesian_network(evidence: Dict[str, str]) -> None:
         start_x, start_y = GRAPH_POSITIONS[source]
         end_x, end_y = GRAPH_POSITIONS[target]
         source_state = evidence.get(source, max(node_posteriors[source], key=node_posteriors[source].get))
-        source_color = NODE_COLOR_PALETTE[source][source_state]
+        source_color = NODE_COLOR_PALETTE[source].get(source_state, "#1a925a")
         ax.annotate(
             "",
             xy=(end_x, end_y),
@@ -269,6 +328,10 @@ def render_bayesian_network(evidence: Dict[str, str]) -> None:
     st.pyplot(fig, width="stretch", clear_figure=True)
 
 
+# ============================================================
+# UI LAYOUT
+# ============================================================
+
 st.markdown(
     """
     <div class="hero">
@@ -279,21 +342,71 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Model Toggle Section
+st.markdown("<div class='model-toggle'>", unsafe_allow_html=True)
+col1, col2 = st.columns([0.5, 0.5])
+
+with col1:
+    st.write("**Select Analysis Model:**")
+
+with col2:
+    model_options = ["Rule-Based Model", "ML-Based Model"] if ml_available else ["Rule-Based Model"]
+    default_idx = 0 if st.session_state.model_type == "rule-based" else 1
+    selected_model = st.radio(
+        "Model Type",
+        options=model_options,
+        index=min(default_idx, len(model_options) - 1),
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+
+st.markdown("</div>", unsafe_allow_html=True)
+
+# Update model type in session state
+if selected_model == "Rule-Based Model":
+    st.session_state.model_type = "rule-based"
+elif selected_model == "ML-Based Model":
+    st.session_state.model_type = "ml-based"
+
+# Initialize variables for the selected model
+initialize_variables(st.session_state.model_type)
+
+# Display model info badge
+if st.session_state.model_type == "rule-based":
+    st.markdown(
+        '<span class="model-badge badge-rule">📊 Using Rule-Based Expert System</span>',
+        unsafe_allow_html=True,
+    )
+    model_description = "This model uses expert-defined rules and weights to estimate fraud probability based on transaction characteristics."
+else:
+    st.markdown(
+        '<span class="model-badge badge-ml">🤖 Using ML-Trained Model</span>',
+        unsafe_allow_html=True,
+    )
+    model_description = "This model uses a machine learning approach trained on real fraud data to provide data-driven fraud probability estimates."
+
+st.caption(model_description)
+
+st.divider()
+
+# Main Input Section
 left_col, right_col = st.columns([1.05, 0.95], gap="large")
+
+current_vars = VARIABLE_STATES if VARIABLE_STATES else (ML_VARIABLE_STATES if ml_available else {})
 
 with left_col:
     st.subheader("Transaction Evidence")
-    st.selectbox("Location", VARIABLE_STATES["Location"], index=0, key="location")
-    st.selectbox("Time", VARIABLE_STATES["Time"], index=0, key="time_of_day")
-    st.selectbox("Device", VARIABLE_STATES["Device"], index=0, key="device")
-    st.selectbox("Amount", VARIABLE_STATES["Amount"], index=0, key="amount")
-    st.selectbox("Frequency", VARIABLE_STATES["Frequency"], index=0, key="frequency")
+    st.selectbox("Location", current_vars.get("Location", ["Local"]), index=0, key="location")
+    st.selectbox("Time", current_vars.get("Time", ["Day"]), index=0, key="time_of_day")
+    st.selectbox("Device", current_vars.get("Device", ["Known"]), index=0, key="device")
+    st.selectbox("Amount", current_vars.get("Amount", ["Low"]), index=0, key="amount")
+    st.selectbox("Frequency", current_vars.get("Frequency", ["Frequent"]), index=0, key="frequency")
 
-    evidence = build_evidence()
+    evidence = build_evidence(st.session_state.model_type)
 
 with right_col:
     st.subheader("Risk Output")
-    fraud_probability = get_fraud_probability(evidence)
+    fraud_probability = get_fraud_probability(evidence, model_type=st.session_state.model_type)
     risk_percent = fraud_probability * 100
     risk_label, risk_class, summary = risk_metadata(fraud_probability)
 
@@ -339,14 +452,14 @@ for column, (name, value) in zip(selected_cols, evidence.items()):
         st.metric(name, value)
 
 st.subheader("Bayesian Network Visualization")
-render_bayesian_network(evidence)
+render_bayesian_network(evidence, st.session_state.model_type)
 
 st.subheader("Bayesian Insight")
-fraud_posterior = get_node_marginal("Fraud", evidence)
+fraud_posterior = get_node_marginal("Fraud", evidence, model_type=st.session_state.model_type)
 yes_prob = fraud_posterior["Yes"]
 no_prob = fraud_posterior["No"]
 
-signal_total = sum(EVIDENCE_SIGNAL_SCORE[node][value] for node, value in evidence.items())
+signal_total = sum(EVIDENCE_SIGNAL_SCORE.get(node, {}).get(value, 0) for node, value in evidence.items())
 if signal_total <= 2:
     signal_label = "Mostly Safe Pattern"
     signal_class = "chip-low"
@@ -372,7 +485,7 @@ with insight_left:
     )
     st.progress(int(yes_prob * 100), text="Fraud Yes probability")
 
-    amount_posterior = get_node_marginal("Amount", evidence)
+    amount_posterior = get_node_marginal("Amount", evidence, model_type=st.session_state.model_type)
     top_amount = max(amount_posterior, key=amount_posterior.get)
     st.markdown(
         f"""
@@ -388,7 +501,7 @@ with insight_left:
 with insight_right:
     chips_html = ""
     for node, value in evidence.items():
-        level = EVIDENCE_SIGNAL_SCORE[node][value]
+        level = EVIDENCE_SIGNAL_SCORE.get(node, {}).get(value, 0)
         chip_class = "chip-high" if level == 2 else "chip-mid" if level == 1 else "chip-low"
         chips_html += f'<span class="chip {chip_class}">{node}: {value}</span>'
 
@@ -405,3 +518,6 @@ with insight_right:
     )
 
 st.caption("Node colors update with your selected evidence, while the center Fraud node reflects the current risk state.")
+
+if not ml_available:
+    st.warning("⚠️ ML-Based Model is not available. To enable it, ensure `fraud_model.pkl` is in the project directory.")
